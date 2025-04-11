@@ -1,0 +1,28 @@
+﻿
+Microsoft Visual Studio Solution File, Format Version 12.00
+# Visual Studio Version 17
+VisualStudioVersion = 17.13.35931.197 d17.13
+MinimumVisualStudioVersion = 10.0.40219.1
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "HealthcareTransparencyParser", "HealthcareTransparencyParser.csproj", "{B51CAB62-DE4D-7568-46E7-F353E072303F}"
+EndProject
+Global
+	GlobalSection(SolutionConfigurationPlatforms) = preSolution
+		Debug|Any CPU = Debug|Any CPU
+		Develeopment|Any CPU = Develeopment|Any CPU
+		Release|Any CPU = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(ProjectConfigurationPlatforms) = postSolution
+		{B51CAB62-DE4D-7568-46E7-F353E072303F}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{B51CAB62-DE4D-7568-46E7-F353E072303F}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{B51CAB62-DE4D-7568-46E7-F353E072303F}.Develeopment|Any CPU.ActiveCfg = Develeopment|Any CPU
+		{B51CAB62-DE4D-7568-46E7-F353E072303F}.Develeopment|Any CPU.Build.0 = Develeopment|Any CPU
+		{B51CAB62-DE4D-7568-46E7-F353E072303F}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{B51CAB62-DE4D-7568-46E7-F353E072303F}.Release|Any CPU.Build.0 = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(SolutionProperties) = preSolution
+		HideSolutionNode = FALSE
+	EndGlobalSection
+	GlobalSection(ExtensibilityGlobals) = postSolution
+		SolutionGuid = {C8C1E237-8276-4E2F-AFC3-27E90BA8052D}
+	EndGlobalSection
+EndGlobal
