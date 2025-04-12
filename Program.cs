@@ -24,10 +24,11 @@ namespace HealthcareTransparencyParser
                 "URL to the gzipped JSON file to process"
             );
 
-            var schemaOption = new Option<string>(
+            var schemaOption = new Option<string[]>(
                 "--schema",
-                "JSON schema type to process (providers-reference)"
-            );
+                "JSON schema type(s) to process (providers-reference, allowed-amounts, in-network-rates)"
+            )
+            { AllowMultipleArgumentsPerToken = true };
 
             var connectionStringOption = new Option<string>(
                 "--connection-string",
@@ -62,7 +63,7 @@ namespace HealthcareTransparencyParser
             rootCommand.AddOption(mockProvidersCountOption);
             rootCommand.AddOption(environmentOption);
 
-            rootCommand.SetHandler(async (url, schema, connectionString, batchSize, useMockData, mockProvidersCount, environment) =>
+            rootCommand.SetHandler(async (url, schemas, connectionString, batchSize, useMockData, mockProvidersCount, environment) =>
             {
                 IHost host = null;
 
@@ -86,9 +87,10 @@ namespace HealthcareTransparencyParser
                         url = config.DataFileUrl;
                     }
 
-                    if (string.IsNullOrEmpty(schema))
+                    // Get default schema if none specified
+                    if (schemas == null || schemas.Length == 0)
                     {
-                        schema = config.DefaultSchema;
+                        schemas = config.DefaultSchema.Split(';');
                     }
 
                     if (string.IsNullOrEmpty(connectionString))
@@ -121,85 +123,94 @@ namespace HealthcareTransparencyParser
                         mockProvidersCount = config.MockProvidersCount;
                     }
 
-                    // Update the handler section in Program.cs to handle all schemas with mock data generation
-                    if (useMockData)
+                    var supportedSchemas = new List<string>() { "providers-reference", "allowed-amounts", "in-network-rates" };
+                    var mockDataGenerator = host.Services.GetRequiredService<MockDataGenerator>();
+                    var processor = host.Services.GetRequiredService<JsonProcessor>();
+                    var tempFiles = new List<string>();
+
+                    // Process each schema
+                    foreach (var schema in schemas)
                     {
-                        if (string.IsNullOrEmpty(url))
+                        string schemaLower = schema.ToLower();
+
+                        if (!supportedSchemas.Contains(schemaLower))
                         {
-                            // Generate a temporary file path for the mock data
-                            url = Path.Combine(Path.GetTempPath(), $"mock_{schema}_data_{Guid.NewGuid()}.json.gz");
-                            Console.WriteLine($"Generating mock data file: {url}");
+                            Console.WriteLine($"Warning: Schema '{schema}' is not supported. Skipping.");
+                            continue;
+                        }
 
-                            var mockDataGenerator = host.Services.GetRequiredService<MockDataGenerator>();
+                        string schemaUrl = url;
 
-                            // Check if table should be loaded based on schema type
-                            bool shouldLoad = schema.ToLower() switch
+                        // Check if table should be loaded based on schema type
+                        bool shouldLoad = schemaLower switch
+                        {
+                            "providers-reference" => config.LoadProvidersTable,
+                            "allowed-amounts" => config.LoadAllowedAmountsTable,
+                            "in-network-rates" => config.LoadInNetworkRatesTable,
+                            _ => true
+                        };
+
+                        if (!shouldLoad)
+                        {
+                            Console.WriteLine($"Skipping {schema} processing (disabled in configuration)");
+                            continue;
+                        }
+
+                        // Handle mock data generation for this schema
+                        if (useMockData)
+                        {
+                            // Generate a unique temporary file for each schema
+                            schemaUrl = Path.Combine(Path.GetTempPath(), $"mock_{schemaLower}_data_{Guid.NewGuid()}.json.gz");
+                            tempFiles.Add(schemaUrl);
+                            Console.WriteLine($"Generating mock data file for {schemaLower}: {schemaUrl}");
+
+                            // Generate appropriate mock data based on schema
+                            if (schemaLower == "providers-reference" && config.LoadProvidersTable)
                             {
-                                "providers-reference" => config.LoadProvidersTable,
-                                "allowed-amounts" => config.LoadAllowedAmountsTable,
-                                "in-network-rates" => config.LoadInNetworkRatesTable,
-                                _ => true
-                            };
-
-                            if (!shouldLoad)
-                            {
-                                Console.WriteLine($"Skipping {schema} processing (disabled in configuration)");
-                                return;
-                            }
-
-                            // Generate mock data based on schema type
-                            string schemaLower = schema.ToLower();
-                        
-                            if (config.LoadProvidersTable)
-                            {
-                                await mockDataGenerator.GenerateProvidersReferenceFileAsync(url, mockProvidersCount);
+                                await mockDataGenerator.GenerateProvidersReferenceFileAsync(schemaUrl, mockProvidersCount);
                                 Console.WriteLine($"Generated mock providers-reference data with {mockProvidersCount} providers");
                             }
-                            if (config.LoadAllowedAmountsTable)
+                            else if (schemaLower == "allowed-amounts" && config.LoadAllowedAmountsTable)
                             {
-                                await mockDataGenerator.GenerateAllowedAmountsFileAsync(url, mockProvidersCount);
+                                await mockDataGenerator.GenerateAllowedAmountsFileAsync(schemaUrl, mockProvidersCount);
                                 Console.WriteLine($"Generated mock allowed-amounts data with {mockProvidersCount} items");
                             }
-                            if (config.LoadInNetworkRatesTable)
+                            else if (schemaLower == "in-network-rates" && config.LoadInNetworkRatesTable)
                             {
-                                await mockDataGenerator.GenerateInNetworkRatesFileAsync(url, mockProvidersCount);
+                                await mockDataGenerator.GenerateInNetworkRatesFileAsync(schemaUrl, mockProvidersCount);
                                 Console.WriteLine($"Generated mock in-network-rates data with {mockProvidersCount} items");
                             }
+                        }
+                        else if (string.IsNullOrEmpty(schemaUrl))
+                        {
+                            Console.WriteLine($"Skipping {schema}: URL is required unless mock data is enabled");
+                            continue;
+                        }
 
-                            var schemas = new List<string>() { "providers-reference", "allowed-amounts", "in-network-rates" };
-                            if (!schemas.Contains(schemaLower))
+                        // Process this schema
+                        Console.WriteLine($"Processing schema: {schema}");
+                        await processor.ProcessFileAsync(schema, schemaUrl, connectionString, batchSize);
+                        Console.WriteLine($"Completed processing {schema}");
+                    }
+
+                    // Clean up all temporary files
+                    foreach (var tempFile in tempFiles)
+                    {
+                        if (File.Exists(tempFile))
+                        {
+                            try
                             {
-                                throw new NotSupportedException($"Mock data generation for schema '{schema}' is not supported");
+                                File.Delete(tempFile);
+                                Console.WriteLine($"Deleted temporary mock data file: {tempFile}");
+                            }
+                            catch (Exception ex)
+                            {
+                                Console.WriteLine($"Warning: Failed to delete temporary file: {ex.Message}");
                             }
                         }
-                        else
-                        {
-                            Console.WriteLine("Both URL and mock data enabled, using provided URL");
-                        }
-                    }
-                    else if (string.IsNullOrEmpty(url))
-                    {
-                        throw new ArgumentException("URL is required unless mock data is enabled");
                     }
 
-                    var processor = host.Services.GetRequiredService<JsonProcessor>();
-                    await processor.ProcessFileAsync(schema, url, connectionString, batchSize);
-
-                    // Clean up mock data file if it was generated
-                    if (useMockData && File.Exists(url) && url.StartsWith(Path.GetTempPath()))
-                    {
-                        try
-                        {
-                            File.Delete(url);
-                            Console.WriteLine($"Deleted temporary mock data file: {url}");
-                        }
-                        catch (Exception ex)
-                        {
-                            Console.WriteLine($"Warning: Failed to delete temporary file: {ex.Message}");
-                        }
-                    }
-
-                    Console.WriteLine("Processing completed successfully.");
+                    Console.WriteLine("All processing completed successfully.");
                     Environment.ExitCode = 0;
                 }
                 catch (Exception ex)
