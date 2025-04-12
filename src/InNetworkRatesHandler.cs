@@ -1,5 +1,6 @@
 ﻿using System;
 using System.Collections.Generic;
+using System.Data;
 using System.IO;
 using System.Linq;
 using System.Text.Json;
@@ -147,7 +148,7 @@ END";
                             // Sort items by ID for consistent processing
                             items.Sort((a, b) => a.ItemId.CompareTo(b.ItemId));
 
-                            await SaveInNetworkRatesBatchAsync(connectionString, items, providerGroups, providerReferences, rates);
+                            await SaveInNetworkRatesBulkBatchAsync(connectionString, items, providerGroups, providerReferences, rates);
 
                             // Update last processed ID
                             currentLastProcessedId = items.Last().ItemId.ToString();
@@ -169,7 +170,7 @@ END";
                 if (items.Count > 0)
                 {
                     items.Sort((a, b) => a.ItemId.CompareTo(b.ItemId));
-                    await SaveInNetworkRatesBatchAsync(connectionString, items, providerGroups, providerReferences, rates);
+                    await SaveInNetworkRatesBulkBatchAsync(connectionString, items, providerGroups, providerReferences, rates);
 
                     currentLastProcessedId = items.Last().ItemId.ToString();
                     await UpdateProcessingStateAsync(connectionString, currentLastProcessedId);
@@ -367,6 +368,200 @@ END";
             }
 
             return result;
+        }
+
+        private async Task SaveInNetworkRatesBulkBatchAsync(
+    string connectionString,
+    List<InNetworkRatesItem> items,
+    List<InNetworkProviderGroup> providerGroups,
+    List<InNetworkProviderReference> providerReferences,
+    List<InNetworkRate> rates)
+        {
+            using var connection = new SqlConnection(connectionString);
+            await connection.OpenAsync();
+
+            using var transaction = connection.BeginTransaction();
+
+            try
+            {
+                // Prepare items DataTable
+                DataTable itemsTable = new DataTable();
+                itemsTable.Columns.Add("ItemId", typeof(Guid));
+                itemsTable.Columns.Add("ReportingEntityName", typeof(string));
+                itemsTable.Columns.Add("ReportingEntityType", typeof(string));
+                itemsTable.Columns.Add("LastUpdatedOn", typeof(DateTime));
+                itemsTable.Columns.Add("Version", typeof(string));
+                itemsTable.Columns.Add("BillingCode", typeof(string));
+                itemsTable.Columns.Add("BillingCodeType", typeof(string));
+                itemsTable.Columns.Add("BillingCodeTypeVersion", typeof(string));
+                itemsTable.Columns.Add("NegotiationArrangement", typeof(string));
+                itemsTable.Columns.Add("Description", typeof(string));
+                itemsTable.Columns.Add("BundledCodes", typeof(string));
+
+                foreach (var item in items)
+                {
+                    DataRow row = itemsTable.NewRow();
+                    row["ItemId"] = item.ItemId;
+                    row["ReportingEntityName"] = item.ReportingEntityName ?? (object)DBNull.Value;
+                    row["ReportingEntityType"] = item.ReportingEntityType ?? (object)DBNull.Value;
+                    row["LastUpdatedOn"] = item.LastUpdatedOn ?? (object)DBNull.Value;
+                    row["Version"] = item.Version ?? (object)DBNull.Value;
+                    row["BillingCode"] = item.BillingCode ?? (object)DBNull.Value;
+                    row["BillingCodeType"] = item.BillingCodeType ?? (object)DBNull.Value;
+                    row["BillingCodeTypeVersion"] = item.BillingCodeTypeVersion ?? (object)DBNull.Value;
+                    row["NegotiationArrangement"] = item.NegotiationArrangement ?? (object)DBNull.Value;
+                    row["Description"] = item.Description ?? (object)DBNull.Value;
+                    row["BundledCodes"] = item.BundledCodes ?? (object)DBNull.Value;
+                    itemsTable.Rows.Add(row);
+                }
+
+                // Bulk insert items
+                using (var bulkCopy = new SqlBulkCopy(connection, SqlBulkCopyOptions.Default, transaction))
+                {
+                    bulkCopy.DestinationTableName = "transparency.InNetworkRatesItems";
+                    bulkCopy.BulkCopyTimeout = 600; // 10 minutes
+                    bulkCopy.BatchSize = 10000;
+
+                    // Add column mappings
+                    bulkCopy.ColumnMappings.Add("ItemId", "ItemId");
+                    bulkCopy.ColumnMappings.Add("ReportingEntityName", "ReportingEntityName");
+                    bulkCopy.ColumnMappings.Add("ReportingEntityType", "ReportingEntityType");
+                    bulkCopy.ColumnMappings.Add("LastUpdatedOn", "LastUpdatedOn");
+                    bulkCopy.ColumnMappings.Add("Version", "Version");
+                    bulkCopy.ColumnMappings.Add("BillingCode", "BillingCode");
+                    bulkCopy.ColumnMappings.Add("BillingCodeType", "BillingCodeType");
+                    bulkCopy.ColumnMappings.Add("BillingCodeTypeVersion", "BillingCodeTypeVersion");
+                    bulkCopy.ColumnMappings.Add("NegotiationArrangement", "NegotiationArrangement");
+                    bulkCopy.ColumnMappings.Add("Description", "Description");
+                    bulkCopy.ColumnMappings.Add("BundledCodes", "BundledCodes");
+
+                    await bulkCopy.WriteToServerAsync(itemsTable);
+                }
+
+                // Bulk insert provider groups
+                if (providerGroups.Count > 0)
+                {
+                    DataTable groupsTable = new DataTable();
+                    groupsTable.Columns.Add("GroupId", typeof(Guid));
+                    groupsTable.Columns.Add("ItemId", typeof(Guid));
+                    groupsTable.Columns.Add("ProviderGroupId", typeof(string));
+
+                    foreach (var group in providerGroups)
+                    {
+                        DataRow row = groupsTable.NewRow();
+                        row["GroupId"] = group.GroupId;
+                        row["ItemId"] = group.ItemId;
+                        row["ProviderGroupId"] = group.ProviderGroupId ?? (object)DBNull.Value;
+                        groupsTable.Rows.Add(row);
+                    }
+
+                    using (var bulkCopy = new SqlBulkCopy(connection, SqlBulkCopyOptions.Default, transaction))
+                    {
+                        bulkCopy.DestinationTableName = "transparency.InNetworkProviderGroups";
+                        bulkCopy.BulkCopyTimeout = 600;
+                        bulkCopy.BatchSize = 10000;
+
+                        // Add column mappings
+                        bulkCopy.ColumnMappings.Add("GroupId", "GroupId");
+                        bulkCopy.ColumnMappings.Add("ItemId", "ItemId");
+                        bulkCopy.ColumnMappings.Add("ProviderGroupId", "ProviderGroupId");
+
+                        await bulkCopy.WriteToServerAsync(groupsTable);
+                    }
+                }
+
+                // Bulk insert provider references
+                if (providerReferences.Count > 0)
+                {
+                    DataTable referencesTable = new DataTable();
+                    referencesTable.Columns.Add("Id", typeof(Guid));
+                    referencesTable.Columns.Add("GroupId", typeof(Guid));
+                    referencesTable.Columns.Add("ProviderReference", typeof(string));
+
+                    foreach (var reference in providerReferences)
+                    {
+                        DataRow row = referencesTable.NewRow();
+                        row["Id"] = reference.Id;
+                        row["GroupId"] = reference.GroupId;
+                        row["ProviderReference"] = reference.ProviderReference ?? (object)DBNull.Value;
+                        referencesTable.Rows.Add(row);
+                    }
+
+                    using (var bulkCopy = new SqlBulkCopy(connection, SqlBulkCopyOptions.Default, transaction))
+                    {
+                        bulkCopy.DestinationTableName = "transparency.InNetworkProviderReferences";
+                        bulkCopy.BulkCopyTimeout = 600;
+                        bulkCopy.BatchSize = 10000;
+
+                        // Add column mappings
+                        bulkCopy.ColumnMappings.Add("Id", "Id");
+                        bulkCopy.ColumnMappings.Add("GroupId", "GroupId");
+                        bulkCopy.ColumnMappings.Add("ProviderReference", "ProviderReference");
+
+                        await bulkCopy.WriteToServerAsync(referencesTable);
+                    }
+                }
+
+                // Bulk insert rates
+                if (rates.Count > 0)
+                {
+                    DataTable ratesTable = new DataTable();
+                    ratesTable.Columns.Add("Id", typeof(Guid));
+                    ratesTable.Columns.Add("GroupId", typeof(Guid));
+                    ratesTable.Columns.Add("NegotiatedType", typeof(string));
+                    ratesTable.Columns.Add("NegotiatedRate", typeof(decimal));
+                    ratesTable.Columns.Add("ExpirationDate", typeof(DateTime));
+                    ratesTable.Columns.Add("ServiceCode", typeof(string));
+                    ratesTable.Columns.Add("BillingCurrencyCode", typeof(string));
+                    ratesTable.Columns.Add("BillingCurrencyUnit", typeof(string));
+                    ratesTable.Columns.Add("AdditionalInfo", typeof(string));
+
+                    foreach (var rate in rates)
+                    {
+                        DataRow row = ratesTable.NewRow();
+                        row["Id"] = rate.Id;
+                        row["GroupId"] = rate.GroupId;
+                        row["NegotiatedType"] = rate.NegotiatedType ?? (object)DBNull.Value;
+                        row["NegotiatedRate"] = rate.NegotiatedRate ?? (object)DBNull.Value;
+                        row["ExpirationDate"] = rate.ExpirationDate ?? (object)DBNull.Value;
+                        row["ServiceCode"] = rate.ServiceCode ?? (object)DBNull.Value;
+                        row["BillingCurrencyCode"] = rate.BillingCurrencyCode ?? (object)DBNull.Value;
+                        row["BillingCurrencyUnit"] = rate.BillingCurrencyUnit ?? (object)DBNull.Value;
+                        row["AdditionalInfo"] = rate.AdditionalInfo ?? (object)DBNull.Value;
+                        ratesTable.Rows.Add(row);
+                    }
+
+                    using (var bulkCopy = new SqlBulkCopy(connection, SqlBulkCopyOptions.Default, transaction))
+                    {
+                        bulkCopy.DestinationTableName = "transparency.InNetworkRates";
+                        bulkCopy.BulkCopyTimeout = 600;
+                        bulkCopy.BatchSize = 10000;
+
+                        // Add column mappings
+                        bulkCopy.ColumnMappings.Add("Id", "Id");
+                        bulkCopy.ColumnMappings.Add("GroupId", "GroupId");
+                        bulkCopy.ColumnMappings.Add("NegotiatedType", "NegotiatedType");
+                        bulkCopy.ColumnMappings.Add("NegotiatedRate", "NegotiatedRate");
+                        bulkCopy.ColumnMappings.Add("ExpirationDate", "ExpirationDate");
+                        bulkCopy.ColumnMappings.Add("ServiceCode", "ServiceCode");
+                        bulkCopy.ColumnMappings.Add("BillingCurrencyCode", "BillingCurrencyCode");
+                        bulkCopy.ColumnMappings.Add("BillingCurrencyUnit", "BillingCurrencyUnit");
+                        bulkCopy.ColumnMappings.Add("AdditionalInfo", "AdditionalInfo");
+
+                        await bulkCopy.WriteToServerAsync(ratesTable);
+                    }
+                }
+
+                await transaction.CommitAsync();
+                _logger.LogInformation($"Bulk inserted {items.Count} items, {providerGroups.Count} provider groups, " +
+                                      $"{providerReferences.Count} provider references, and {rates.Count} rates");
+            }
+            catch (Exception ex)
+            {
+                await transaction.RollbackAsync();
+                _logger.LogError(ex, "Error bulk saving in-network rates batch");
+                throw;
+            }
         }
 
         private async Task SaveInNetworkRatesBatchAsync(
