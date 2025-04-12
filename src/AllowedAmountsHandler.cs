@@ -1,5 +1,6 @@
 ﻿using System;
 using System.Collections.Generic;
+using System.Data;
 using System.IO;
 using System.Linq;
 using System.Text.Json;
@@ -138,7 +139,7 @@ END";
                             // Sort items by ID for consistent processing
                             items.Sort((a, b) => a.ItemId.CompareTo(b.ItemId));
 
-                            await SaveAllowedAmountsBatchAsync(connectionString, items, providers, rates);
+                            await SaveAllowedAmountsBulkBatchAsync(connectionString, items, providers, rates);
 
                             // Update last processed ID
                             currentLastProcessedId = items.Last().ItemId.ToString();
@@ -159,7 +160,7 @@ END";
                 if (items.Count > 0)
                 {
                     items.Sort((a, b) => a.ItemId.CompareTo(b.ItemId));
-                    await SaveAllowedAmountsBatchAsync(connectionString, items, providers, rates);
+                    await SaveAllowedAmountsBulkBatchAsync(connectionString, items, providers, rates);
 
                     currentLastProcessedId = items.Last().ItemId.ToString();
                     await UpdateProcessingStateAsync(connectionString, currentLastProcessedId);
@@ -356,6 +357,175 @@ END";
             }
 
             return result;
+        }
+
+        private async Task SaveAllowedAmountsBulkBatchAsync(
+    string connectionString,
+    List<AllowedAmountsItem> items,
+    List<AllowedAmountsProvider> providers,
+    List<AllowedAmountsRate> rates)
+        {
+            using var connection = new SqlConnection(connectionString);
+            await connection.OpenAsync();
+
+            using var transaction = connection.BeginTransaction();
+
+            try
+            {
+                // Prepare items DataTable
+                DataTable itemsTable = new DataTable();
+                itemsTable.Columns.Add("ItemId", typeof(Guid));
+                itemsTable.Columns.Add("ReportingEntityName", typeof(string));
+                itemsTable.Columns.Add("ReportingEntityType", typeof(string));
+                itemsTable.Columns.Add("LastUpdatedOn", typeof(DateTime));
+                itemsTable.Columns.Add("Version", typeof(string));
+                itemsTable.Columns.Add("BillingCode", typeof(string));
+                itemsTable.Columns.Add("BillingCodeType", typeof(string));
+                itemsTable.Columns.Add("BillingCodeTypeVersion", typeof(string));
+                itemsTable.Columns.Add("NegotiationArrangement", typeof(string));
+                itemsTable.Columns.Add("Description", typeof(string));
+
+                foreach (var item in items)
+                {
+                    DataRow row = itemsTable.NewRow();
+                    row["ItemId"] = item.ItemId;
+                    row["ReportingEntityName"] = item.ReportingEntityName ?? (object)DBNull.Value;
+                    row["ReportingEntityType"] = item.ReportingEntityType ?? (object)DBNull.Value;
+                    row["LastUpdatedOn"] = item.LastUpdatedOn ?? (object)DBNull.Value;
+                    row["Version"] = item.Version ?? (object)DBNull.Value;
+                    row["BillingCode"] = item.BillingCode ?? (object)DBNull.Value;
+                    row["BillingCodeType"] = item.BillingCodeType ?? (object)DBNull.Value;
+                    row["BillingCodeTypeVersion"] = item.BillingCodeTypeVersion ?? (object)DBNull.Value;
+                    row["NegotiationArrangement"] = item.NegotiationArrangement ?? (object)DBNull.Value;
+                    row["Description"] = item.Description ?? (object)DBNull.Value;
+                    itemsTable.Rows.Add(row);
+                }
+
+                // Bulk insert items
+                using (var bulkCopy = new SqlBulkCopy(connection, SqlBulkCopyOptions.Default, transaction))
+                {
+                    bulkCopy.DestinationTableName = "transparency.AllowedAmountsItems";
+                    bulkCopy.BulkCopyTimeout = 600; // 10 minutes
+                    bulkCopy.BatchSize = 10000;
+
+                    // Add column mappings
+                    bulkCopy.ColumnMappings.Add("ItemId", "ItemId");
+                    bulkCopy.ColumnMappings.Add("ReportingEntityName", "ReportingEntityName");
+                    bulkCopy.ColumnMappings.Add("ReportingEntityType", "ReportingEntityType");
+                    bulkCopy.ColumnMappings.Add("LastUpdatedOn", "LastUpdatedOn");
+                    bulkCopy.ColumnMappings.Add("Version", "Version");
+                    bulkCopy.ColumnMappings.Add("BillingCode", "BillingCode");
+                    bulkCopy.ColumnMappings.Add("BillingCodeType", "BillingCodeType");
+                    bulkCopy.ColumnMappings.Add("BillingCodeTypeVersion", "BillingCodeTypeVersion");
+                    bulkCopy.ColumnMappings.Add("NegotiationArrangement", "NegotiationArrangement");
+                    bulkCopy.ColumnMappings.Add("Description", "Description");
+
+                    await bulkCopy.WriteToServerAsync(itemsTable);
+                }
+
+                // Bulk insert providers
+                if (providers.Count > 0)
+                {
+                    DataTable providersTable = new DataTable();
+                    providersTable.Columns.Add("Id", typeof(Guid));
+                    providersTable.Columns.Add("ItemId", typeof(Guid));
+                    providersTable.Columns.Add("ProviderId", typeof(string));
+                    providersTable.Columns.Add("NPI", typeof(string));
+                    providersTable.Columns.Add("TIN_Type", typeof(string));
+                    providersTable.Columns.Add("TIN_Value", typeof(string));
+                    providersTable.Columns.Add("ServiceCode", typeof(string));
+                    providersTable.Columns.Add("BillingClass", typeof(string));
+
+                    foreach (var provider in providers)
+                    {
+                        DataRow row = providersTable.NewRow();
+                        row["Id"] = provider.Id;
+                        row["ItemId"] = provider.ItemId;
+                        row["ProviderId"] = provider.ProviderId ?? (object)DBNull.Value;
+                        row["NPI"] = provider.NPI ?? (object)DBNull.Value;
+                        row["TIN_Type"] = provider.TIN_Type ?? (object)DBNull.Value;
+                        row["TIN_Value"] = provider.TIN_Value ?? (object)DBNull.Value;
+                        row["ServiceCode"] = provider.ServiceCode ?? (object)DBNull.Value;
+                        row["BillingClass"] = provider.BillingClass ?? (object)DBNull.Value;
+                        providersTable.Rows.Add(row);
+                    }
+
+                    using (var bulkCopy = new SqlBulkCopy(connection, SqlBulkCopyOptions.Default, transaction))
+                    {
+                        bulkCopy.DestinationTableName = "transparency.AllowedAmountsProviders";
+                        bulkCopy.BulkCopyTimeout = 600;
+                        bulkCopy.BatchSize = 10000;
+
+                        // Add column mappings
+                        bulkCopy.ColumnMappings.Add("Id", "Id");
+                        bulkCopy.ColumnMappings.Add("ItemId", "ItemId");
+                        bulkCopy.ColumnMappings.Add("ProviderId", "ProviderId");
+                        bulkCopy.ColumnMappings.Add("NPI", "NPI");
+                        bulkCopy.ColumnMappings.Add("TIN_Type", "TIN_Type");
+                        bulkCopy.ColumnMappings.Add("TIN_Value", "TIN_Value");
+                        bulkCopy.ColumnMappings.Add("ServiceCode", "ServiceCode");
+                        bulkCopy.ColumnMappings.Add("BillingClass", "BillingClass");
+
+                        await bulkCopy.WriteToServerAsync(providersTable);
+                    }
+                }
+
+                // Bulk insert rates
+                if (rates.Count > 0)
+                {
+                    DataTable ratesTable = new DataTable();
+                    ratesTable.Columns.Add("Id", typeof(Guid));
+                    ratesTable.Columns.Add("ItemId", typeof(Guid));
+                    ratesTable.Columns.Add("AllowedAmount", typeof(decimal));
+                    ratesTable.Columns.Add("BilledService", typeof(string));
+                    ratesTable.Columns.Add("BillingCurrencyCode", typeof(string));
+                    ratesTable.Columns.Add("BillingCurrencyUnit", typeof(string));
+                    ratesTable.Columns.Add("ExpirationDate", typeof(DateTime));
+                    ratesTable.Columns.Add("ServiceCode", typeof(string));
+
+                    foreach (var rate in rates)
+                    {
+                        DataRow row = ratesTable.NewRow();
+                        row["Id"] = rate.Id;
+                        row["ItemId"] = rate.ItemId;
+                        row["AllowedAmount"] = rate.AllowedAmount ?? (object)DBNull.Value;
+                        row["BilledService"] = rate.BilledService ?? (object)DBNull.Value;
+                        row["BillingCurrencyCode"] = rate.BillingCurrencyCode ?? (object)DBNull.Value;
+                        row["BillingCurrencyUnit"] = rate.BillingCurrencyUnit ?? (object)DBNull.Value;
+                        row["ExpirationDate"] = rate.ExpirationDate ?? (object)DBNull.Value;
+                        row["ServiceCode"] = rate.ServiceCode ?? (object)DBNull.Value;
+                        ratesTable.Rows.Add(row);
+                    }
+
+                    using (var bulkCopy = new SqlBulkCopy(connection, SqlBulkCopyOptions.Default, transaction))
+                    {
+                        bulkCopy.DestinationTableName = "transparency.AllowedAmountsRates";
+                        bulkCopy.BulkCopyTimeout = 600;
+                        bulkCopy.BatchSize = 10000;
+
+                        // Add column mappings
+                        bulkCopy.ColumnMappings.Add("Id", "Id");
+                        bulkCopy.ColumnMappings.Add("ItemId", "ItemId");
+                        bulkCopy.ColumnMappings.Add("AllowedAmount", "AllowedAmount");
+                        bulkCopy.ColumnMappings.Add("BilledService", "BilledService");
+                        bulkCopy.ColumnMappings.Add("BillingCurrencyCode", "BillingCurrencyCode");
+                        bulkCopy.ColumnMappings.Add("BillingCurrencyUnit", "BillingCurrencyUnit");
+                        bulkCopy.ColumnMappings.Add("ExpirationDate", "ExpirationDate");
+                        bulkCopy.ColumnMappings.Add("ServiceCode", "ServiceCode");
+
+                        await bulkCopy.WriteToServerAsync(ratesTable);
+                    }
+                }
+
+                await transaction.CommitAsync();
+                _logger.LogInformation($"Bulk inserted {items.Count} items, {providers.Count} providers, and {rates.Count} rates");
+            }
+            catch (Exception ex)
+            {
+                await transaction.RollbackAsync();
+                _logger.LogError(ex, "Error bulk saving allowed amounts batch");
+                throw;
+            }
         }
 
         private async Task SaveAllowedAmountsBatchAsync(

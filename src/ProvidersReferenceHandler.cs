@@ -13,6 +13,7 @@ using System.Threading.Tasks;
 using Dapper;
 using Microsoft.Data.SqlClient;
 using Microsoft.Extensions.Logging;
+using System.Data;
 
 namespace HealthcareTransparencyParser
 {
@@ -142,7 +143,7 @@ END";
                             // Sort providers by ID for consistent processing
                             providers.Sort((a, b) => string.Compare(a.ProviderId, b.ProviderId, StringComparison.Ordinal));
 
-                            await SaveProvidersBatchAsync(connectionString, providers, addresses);
+                            await SaveProvidersBulkBatchAsync(connectionString, providers, addresses);
 
                             // Update last processed ID
                             currentLastProcessedId = providers.Last().ProviderId;
@@ -162,7 +163,7 @@ END";
                 if (providers.Count > 0)
                 {
                     providers.Sort((a, b) => string.Compare(a.ProviderId, b.ProviderId, StringComparison.Ordinal));
-                    await SaveProvidersBatchAsync(connectionString, providers, addresses);
+                    await SaveProvidersBulkBatchAsync(connectionString, providers, addresses);
 
                     currentLastProcessedId = providers.Last().ProviderId;
                     await UpdateProcessingStateAsync(connectionString, currentLastProcessedId);
@@ -286,6 +287,195 @@ END";
             }
 
             return provider;
+        }
+
+        private async Task SaveProvidersBulkBatchAsync(string connectionString, List<Provider> providers, List<ProviderAddress> addresses)
+        {
+            using var connection = new SqlConnection(connectionString);
+            await connection.OpenAsync();
+
+            using var transaction = connection.BeginTransaction();
+
+            try
+            {
+                // Convert providers to DataTable for bulk insert
+                DataTable providersTable = new DataTable();
+                providersTable.Columns.Add("ProviderId", typeof(string));
+                providersTable.Columns.Add("NPI", typeof(string));
+                providersTable.Columns.Add("TIN_Type", typeof(string));
+                providersTable.Columns.Add("TIN_Value", typeof(string));
+                providersTable.Columns.Add("Entity_Type", typeof(string));
+                providersTable.Columns.Add("Organization_Name", typeof(string));
+                providersTable.Columns.Add("PrimaryFirstName", typeof(string));
+                providersTable.Columns.Add("PrimaryMiddleName", typeof(string));
+                providersTable.Columns.Add("PrimaryLastName", typeof(string));
+                providersTable.Columns.Add("PrimarySuffix", typeof(string));
+                providersTable.Columns.Add("LastUpdated", typeof(DateTime));
+
+                // Handle duplicate providers using a dictionary for faster lookups
+                Dictionary<string, Provider> uniqueProviders = new Dictionary<string, Provider>();
+                foreach (var provider in providers)
+                {
+                    // Use last occurrence of each provider ID
+                    uniqueProviders[provider.ProviderId] = provider;
+                }
+
+                foreach (var provider in uniqueProviders.Values)
+                {
+                    DataRow row = providersTable.NewRow();
+                    row["ProviderId"] = provider.ProviderId;
+                    row["NPI"] = provider.NPI ?? (object)DBNull.Value;
+                    row["TIN_Type"] = provider.TIN_Type ?? (object)DBNull.Value;
+                    row["TIN_Value"] = provider.TIN_Value ?? (object)DBNull.Value;
+                    row["Entity_Type"] = provider.Entity_Type ?? (object)DBNull.Value;
+                    row["Organization_Name"] = provider.Organization_Name ?? (object)DBNull.Value;
+                    row["PrimaryFirstName"] = provider.PrimaryFirstName ?? (object)DBNull.Value;
+                    row["PrimaryMiddleName"] = provider.PrimaryMiddleName ?? (object)DBNull.Value;
+                    row["PrimaryLastName"] = provider.PrimaryLastName ?? (object)DBNull.Value;
+                    row["PrimarySuffix"] = provider.PrimarySuffix ?? (object)DBNull.Value;
+                    row["LastUpdated"] = DateTime.UtcNow;
+                    providersTable.Rows.Add(row);
+                }
+
+                // Use MERGE to handle upserts efficiently
+                // First create a temporary table for the bulk insert
+                await connection.ExecuteAsync(@"
+            IF OBJECT_ID('tempdb..#TempProviders') IS NOT NULL
+                DROP TABLE #TempProviders
+            
+            CREATE TABLE #TempProviders (
+                ProviderId NVARCHAR(100) PRIMARY KEY,
+                NPI NVARCHAR(50) NULL,
+                TIN_Type NVARCHAR(50) NULL,
+                TIN_Value NVARCHAR(50) NULL,
+                Entity_Type NVARCHAR(50) NULL,
+                Organization_Name NVARCHAR(255) NULL,
+                PrimaryFirstName NVARCHAR(100) NULL,
+                PrimaryMiddleName NVARCHAR(100) NULL,
+                PrimaryLastName NVARCHAR(100) NULL,
+                PrimarySuffix NVARCHAR(20) NULL,
+                LastUpdated DATETIME2 NOT NULL
+            )", transaction: transaction);
+
+                // Bulk insert to temp table
+                using (var bulkCopy = new SqlBulkCopy(connection, SqlBulkCopyOptions.Default, transaction))
+                {
+                    bulkCopy.DestinationTableName = "#TempProviders";
+                    bulkCopy.BulkCopyTimeout = 600; // 10 minutes
+                    bulkCopy.BatchSize = 10000;
+
+                    // Add column mappings
+                    bulkCopy.ColumnMappings.Add("ProviderId", "ProviderId");
+                    bulkCopy.ColumnMappings.Add("NPI", "NPI");
+                    bulkCopy.ColumnMappings.Add("TIN_Type", "TIN_Type");
+                    bulkCopy.ColumnMappings.Add("TIN_Value", "TIN_Value");
+                    bulkCopy.ColumnMappings.Add("Entity_Type", "Entity_Type");
+                    bulkCopy.ColumnMappings.Add("Organization_Name", "Organization_Name");
+                    bulkCopy.ColumnMappings.Add("PrimaryFirstName", "PrimaryFirstName");
+                    bulkCopy.ColumnMappings.Add("PrimaryMiddleName", "PrimaryMiddleName");
+                    bulkCopy.ColumnMappings.Add("PrimaryLastName", "PrimaryLastName");
+                    bulkCopy.ColumnMappings.Add("PrimarySuffix", "PrimarySuffix");
+                    bulkCopy.ColumnMappings.Add("LastUpdated", "LastUpdated");
+
+                    await bulkCopy.WriteToServerAsync(providersTable);
+                }
+
+                // MERGE from temp table to real table
+                await connection.ExecuteAsync(@"
+            MERGE transparency.Providers AS target
+            USING #TempProviders AS source
+            ON target.ProviderId = source.ProviderId
+            WHEN MATCHED THEN
+                UPDATE SET 
+                    NPI = source.NPI,
+                    TIN_Type = source.TIN_Type,
+                    TIN_Value = source.TIN_Value,
+                    Entity_Type = source.Entity_Type,
+                    Organization_Name = source.Organization_Name,
+                    PrimaryFirstName = source.PrimaryFirstName,
+                    PrimaryMiddleName = source.PrimaryMiddleName,
+                    PrimaryLastName = source.PrimaryLastName,
+                    PrimarySuffix = source.PrimarySuffix,
+                    LastUpdated = source.LastUpdated
+            WHEN NOT MATCHED THEN
+                INSERT (ProviderId, NPI, TIN_Type, TIN_Value, Entity_Type, 
+                        Organization_Name, PrimaryFirstName, PrimaryMiddleName, 
+                        PrimaryLastName, PrimarySuffix, LastUpdated)
+                VALUES (source.ProviderId, source.NPI, source.TIN_Type, source.TIN_Value, 
+                        source.Entity_Type, source.Organization_Name, source.PrimaryFirstName, 
+                        source.PrimaryMiddleName, source.PrimaryLastName, source.PrimarySuffix,
+                        source.LastUpdated);", transaction: transaction);
+
+                // Handle addresses using bulk copy as well
+                if (addresses.Count > 0)
+                {
+                    // Get provider IDs for deletion
+                    var providerIds = uniqueProviders.Keys.ToArray();
+
+                    // Delete existing addresses
+                    await connection.ExecuteAsync(
+                        "DELETE FROM transparency.ProviderAddresses WHERE ProviderId IN @ProviderIds",
+                        new { ProviderIds = providerIds },
+                        transaction);
+
+                    // Prepare address DataTable
+                    DataTable addressesTable = new DataTable();
+                    addressesTable.Columns.Add("AddressId", typeof(Guid));
+                    addressesTable.Columns.Add("ProviderId", typeof(string));
+                    addressesTable.Columns.Add("AddressType", typeof(string));
+                    addressesTable.Columns.Add("Address1", typeof(string));
+                    addressesTable.Columns.Add("Address2", typeof(string));
+                    addressesTable.Columns.Add("City", typeof(string));
+                    addressesTable.Columns.Add("State", typeof(string));
+                    addressesTable.Columns.Add("ZipCode", typeof(string));
+
+                    foreach (var address in addresses)
+                    {
+                        if (uniqueProviders.ContainsKey(address.ProviderId))
+                        {
+                            DataRow row = addressesTable.NewRow();
+                            row["AddressId"] = address.AddressId;
+                            row["ProviderId"] = address.ProviderId;
+                            row["AddressType"] = address.AddressType ?? (object)DBNull.Value;
+                            row["Address1"] = address.Address1 ?? (object)DBNull.Value;
+                            row["Address2"] = address.Address2 ?? (object)DBNull.Value;
+                            row["City"] = address.City ?? (object)DBNull.Value;
+                            row["State"] = address.State ?? (object)DBNull.Value;
+                            row["ZipCode"] = address.ZipCode ?? (object)DBNull.Value;
+                            addressesTable.Rows.Add(row);
+                        }
+                    }
+
+                    // Bulk insert addresses
+                    using (var bulkCopy = new SqlBulkCopy(connection, SqlBulkCopyOptions.Default, transaction))
+                    {
+                        bulkCopy.DestinationTableName = "transparency.ProviderAddresses";
+                        bulkCopy.BulkCopyTimeout = 600; // 10 minutes
+                        bulkCopy.BatchSize = 10000;
+
+                        // Add column mappings
+                        bulkCopy.ColumnMappings.Add("AddressId", "AddressId");
+                        bulkCopy.ColumnMappings.Add("ProviderId", "ProviderId");
+                        bulkCopy.ColumnMappings.Add("AddressType", "AddressType");
+                        bulkCopy.ColumnMappings.Add("Address1", "Address1");
+                        bulkCopy.ColumnMappings.Add("Address2", "Address2");
+                        bulkCopy.ColumnMappings.Add("City", "City");
+                        bulkCopy.ColumnMappings.Add("State", "State");
+                        bulkCopy.ColumnMappings.Add("ZipCode", "ZipCode");
+
+                        await bulkCopy.WriteToServerAsync(addressesTable);
+                    }
+                }
+
+                await transaction.CommitAsync();
+                _logger.LogInformation($"Bulk inserted {uniqueProviders.Count} providers and {addresses.Count} addresses");
+            }
+            catch (Exception ex)
+            {
+                await transaction.RollbackAsync();
+                _logger.LogError(ex, "Error bulk saving providers batch");
+                throw;
+            }
         }
 
         private async Task SaveProvidersBatchAsync(string connectionString, List<Provider> providers, List<ProviderAddress> addresses)
